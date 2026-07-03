@@ -335,7 +335,8 @@ manifest:
       groups:
         - crypto
     - name: mcuboot
-      revision: 6d3b3d2c38ab20c242e5b9abb04d050086383eb2
+      url: https://github.com/SetZero/mcuboot
+      revision: qul-stm32n6-v2.4.0
       path: bootloader/mcuboot
       groups:
         - bootloader
