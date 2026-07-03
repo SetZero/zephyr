@@ -2087,7 +2087,6 @@ static int flash_stm32_xspi_dma_init(DMA_HandleTypeDef *hdma, struct stream *dma
 }
 #endif /* CONFIG_FLASH_STM32_XSPI_DMA */
 
-
 static int flash_stm32_xspi_init(const struct device *dev)
 {
 	const struct flash_stm32_xspi_config *dev_cfg = dev->config;
@@ -2166,6 +2165,99 @@ static int flash_stm32_xspi_init(const struct device *dev)
 		}
 	}
 
+#if defined(CONFIG_SOC_SERIES_STM32N6X)
+	/* On STM32N6 the BootROM loads the FSBL through this controller and
+	 * hands it over in a half-torn-down state: indirect mode with residual
+	 * data in the FIFO and an unfinished transfer; any new transaction
+	 * then hangs with BUSY stuck. Reset the peripheral to its power-on
+	 * state unconditionally: on N6 nothing executes in place through this
+	 * controller (FSBL and application both run from RAM). The XSPI PHY
+	 * (delay line between controller and pads) has its own reset line not
+	 * covered by the controller reset — reset it as well so the handover
+	 * state of the PHY cannot leak into this driver's configuration.
+	 */
+	{
+		extern uint32_t stm32n6_vos_trace[6];
+
+		LOG_INF("XSPI init: VOSCR=%08x CR3=%08x trace %08x %08x %08x %08x %08x %08x",
+			PWR->VOSCR, PWR->CR3,
+			stm32n6_vos_trace[0], stm32n6_vos_trace[1],
+			stm32n6_vos_trace[2], stm32n6_vos_trace[3],
+			stm32n6_vos_trace[4], stm32n6_vos_trace[5]);
+	}
+	/* A STM32CubeProgrammer external-loader session leaves the chip in a
+	 * state where every XSPI transaction hangs with BUSY stuck at any
+	 * clock speed, while plain register access still works; NRST does not
+	 * clear it, only powering the VCORE domain down does. The wedged
+	 * element is not visible in any register: full RCC/XSPIM/XSPI/PWR
+	 * dumps compare bit-identical to a working boot except PWR ACTVOS,
+	 * which turned out to be only a PROXY for "the domain has not been
+	 * power-cycled" (a recovered boot works fine with ACTVOS still low).
+	 * Recovery: one trip through Standby with the IWDG armed to bounce
+	 * straight back — Standby powers the VCORE domain down, which is the
+	 * software-triggered equivalent of unplugging the board. A backup
+	 * register limits this to one attempt per wedge so a state that even
+	 * Standby cannot clear does not loop.
+	 */
+	__HAL_RCC_RTCAPB_CLK_ENABLE();
+	SET_BIT(PWR->DBPCR, PWR_DBPCR_DBP);
+	if ((PWR->VOSCR & PWR_VOSCR_ACTVOS) == 0U) {
+		if (TAMP->BKP31R != 0xACDC0001U) {
+			LOG_WRN("XSPI: post-flash wedged state - standby self-cycle");
+			TAMP->BKP31R = 0xACDC0001U;
+			/* IWDG at LSI/4 with a small reload resets (and thus
+			 * wakes) the chip ~1 ms after Standby entry.
+			 */
+			IWDG->KR = 0x5555U;
+			IWDG->PR = 0U;
+			IWDG->RLR = 8U;
+			IWDG->KR = 0xCCCCU;
+
+			SET_BIT(PWR->CPUCR, PWR_CPUCR_CSSF);
+			PWR->WKUPCR = 0xFFFFFFFFU;
+			SET_BIT(PWR->CPUCR, PWR_CPUCR_PDDS);
+			SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
+			__DSB();
+			for (;;) {
+				__WFI();
+			}
+		}
+		/* Normal post-self-cycle boot: the latch may still read low,
+		 * but the power-down cleared the real gate — proceed.
+		 */
+		LOG_INF("XSPI: continuing after standby self-cycle");
+		TAMP->BKP31R = 0U;
+	} else {
+		if (TAMP->BKP31R == 0xACDC0001U) {
+			LOG_INF("XSPI: recovered by standby self-cycle");
+		}
+		TAMP->BKP31R = 0U;
+	}
+	if (dev_data->hxspi.Instance == XSPI1) {
+		__HAL_RCC_XSPI1_FORCE_RESET();
+		__HAL_RCC_XSPI1_RELEASE_RESET();
+		__HAL_RCC_XSPIPHY1_FORCE_RESET();
+		__HAL_RCC_XSPIPHY1_RELEASE_RESET();
+	} else if (dev_data->hxspi.Instance == XSPI2) {
+		__HAL_RCC_XSPI2_FORCE_RESET();
+		__HAL_RCC_XSPI2_RELEASE_RESET();
+		__HAL_RCC_XSPIPHY2_FORCE_RESET();
+		__HAL_RCC_XSPIPHY2_RELEASE_RESET();
+	}
+	/* The XSPI I/O manager (XSPIM) arbitrates the port with a req/ack
+	 * handshake; left wedged by the handover it never acks, and every
+	 * transaction hangs with BUSY stuck no matter the clock speed. It has
+	 * its own reset line — reset it too (both ports lose their config;
+	 * HAL_XSPIM_Config below reprograms ours, and nothing else is using
+	 * the other port at FSBL time).
+	 */
+	__HAL_RCC_XSPIM_CLK_ENABLE();
+	__HAL_RCC_XSPIM_FORCE_RESET();
+	__HAL_RCC_XSPIM_RELEASE_RESET();
+	/* Let the PHY settle after its reset before configuring/using it */
+	k_busy_wait(1000);
+#endif /* CONFIG_SOC_SERIES_STM32N6X */
+
 	for (; prescaler <= STM32_XSPI_CLOCK_PRESCALER_MAX; prescaler++) {
 		uint32_t clk = STM32_XSPI_CLOCK_COMPUTE(ahb_clock_freq, prescaler);
 
@@ -2178,6 +2270,7 @@ static int flash_stm32_xspi_init(const struct device *dev)
 		LOG_ERR("XSPI could not find valid prescaler value");
 		return -EINVAL;
 	}
+
 
 	/* Initialize XSPI HAL structure completely */
 	dev_data->hxspi.Init.ClockPrescaler = prescaler;
@@ -2228,19 +2321,38 @@ static int flash_stm32_xspi_init(const struct device *dev)
 #endif /* (HAL_XSPIM_IOPORT_1 || HAL_XSPIM_IOPORT_2) && !(xspim node) */
 
 #if defined(XSPI_DCR1_DLYBYP)
-	/* XSPI delay block init Function */
-	HAL_XSPI_DLYB_CfgTypeDef xspi_delay_block_cfg = {0};
+#if defined(CONFIG_SOC_SERIES_STM32N6X)
+	if ((PWR->VOSCR & PWR_VOSCR_ACTVOS) == 0U) {
+		/* In the state a CubeProgrammer external-loader session leaves
+		 * behind (voltage-scale latch ACTVOS stuck low, only POR
+		 * clears it), the delay-block calibration below returns
+		 * garbage and the programmed phase kills the XSPI output
+		 * clock entirely — every transaction then hangs with BUSY
+		 * stuck regardless of prescaler. The BootROM reads the same
+		 * NOR fine in this state because it bypasses the delay block.
+		 * Do the same, at a reduced clock where bypass timing is safe.
+		 */
+		LOG_WRN("XSPI: VOS latch low - delay block bypassed, reduced clock");
+		SET_BIT(dev_data->hxspi.Instance->DCR1, XSPI_DCR1_DLYBYP);
+		MODIFY_REG(dev_data->hxspi.Instance->DCR2,
+			   XSPI_DCR2_PRESCALER, 3U);
+	} else
+#endif /* CONFIG_SOC_SERIES_STM32N6X */
+	{
+		/* XSPI delay block init Function */
+		HAL_XSPI_DLYB_CfgTypeDef xspi_delay_block_cfg = {0};
 
-	(void)HAL_XSPI_DLYB_GetClockPeriod(&dev_data->hxspi, &xspi_delay_block_cfg);
-	/*  with DTR, set the PhaseSel/4 (empiric value from stm32Cube) */
-	xspi_delay_block_cfg.PhaseSel /= 4;
+		(void)HAL_XSPI_DLYB_GetClockPeriod(&dev_data->hxspi, &xspi_delay_block_cfg);
+		/*  with DTR, set the PhaseSel/4 (empiric value from stm32Cube) */
+		xspi_delay_block_cfg.PhaseSel /= 4;
 
-	if (HAL_XSPI_DLYB_SetConfig(&dev_data->hxspi, &xspi_delay_block_cfg) != HAL_OK) {
-		LOG_ERR("XSPI DelayBlock failed");
-		return -EIO;
+		if (HAL_XSPI_DLYB_SetConfig(&dev_data->hxspi, &xspi_delay_block_cfg) != HAL_OK) {
+			LOG_ERR("XSPI DelayBlock failed");
+			return -EIO;
+		}
+
+		LOG_DBG("Delay Block Init");
 	}
-
-	LOG_DBG("Delay Block Init");
 #endif /* XSPI_DCR1_DLYBYP */
 
 #ifdef CONFIG_FLASH_STM32_XSPI_DMA
@@ -2285,7 +2397,33 @@ static int flash_stm32_xspi_init(const struct device *dev)
 	}
 
 	/* Reset NOR flash memory : still with the SPI/STR config for the NOR */
-	if (stm32_xspi_mem_reset(dev) != 0) {
+	ret = stm32_xspi_mem_reset(dev);
+#if defined(CONFIG_SOC_SERIES_STM32N6X)
+	/* Right after the BootROM handover (and the voltage-scale recovery in
+	 * clock init) the first transaction can still time out while things
+	 * settle; retry a few times before giving up.
+	 */
+	for (int retry = 0; ret != 0 && retry < 3; retry++) {
+		/* Progressively slower kernel clock per attempt: when the
+		 * voltage-scale latch (ACTVOS) is stuck low after a
+		 * CubeProgrammer session, the full-speed clock domain is not
+		 * usable, but a slow clock still is.
+		 */
+		static const uint8_t slow_presc[3] = { 7U, 31U, 255U };
+
+		LOG_WRN("XSPI mem reset failed (HAL err=0x%x state=0x%x VOSCR=%08x), retry %d presc=%u",
+			dev_data->hxspi.ErrorCode, dev_data->hxspi.State,
+			PWR->VOSCR, retry, slow_presc[retry]);
+		(void)HAL_XSPI_Abort(&dev_data->hxspi);
+		dev_data->hxspi.State = HAL_XSPI_STATE_READY;
+		dev_data->hxspi.ErrorCode = HAL_XSPI_ERROR_NONE;
+		MODIFY_REG(dev_data->hxspi.Instance->DCR2,
+			   XSPI_DCR2_PRESCALER, slow_presc[retry]);
+		k_busy_wait(20000);
+		ret = stm32_xspi_mem_reset(dev);
+	}
+#endif /* CONFIG_SOC_SERIES_STM32N6X */
+	if (ret != 0) {
 		LOG_ERR("XSPI reset failed");
 		return -EIO;
 	}

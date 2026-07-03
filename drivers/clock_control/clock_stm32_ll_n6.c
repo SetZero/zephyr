@@ -8,6 +8,7 @@
 #include <soc.h>
 #include <stm32_bitops.h>
 #include <stm32_ll_bus.h>
+#include <stm32_ll_gpio.h>
 #include <stm32_ll_pwr.h>
 #include <stm32_ll_rcc.h>
 #include <stm32_ll_utils.h>
@@ -908,11 +909,82 @@ static void set_up_fixed_clock_sources(void)
 	}
 }
 
+/* Step trace of the VOS recovery below, printed later by the XSPI flash
+ * driver (the console is not up yet when this runs).
+ */
+uint32_t stm32n6_vos_trace[6];
+
 int stm32_clock_control_init(const struct device *dev)
 {
 	int r = 0;
 
 	ARG_UNUSED(dev);
+
+	/* On STM32N6 VDDCORE comes from an EXTERNAL regulator; the VOS bit in
+	 * PWR_VOSCR does not change the supply — it only tracks it (ACTVOS
+	 * reflects the voltage actually measured). On the STM32N6570-DK the
+	 * SMPS overdrive select (0.89 V, required for the full clock tree) is
+	 * wired to PF4 (SMPS_OVD). A STM32CubeProgrammer external-loader
+	 * session drops the SMPS out of overdrive and the PMIC keeps that
+	 * level until it loses power, so after a warm reset (NRST) the chip
+	 * runs its 800/200 MHz clock tree at the low voltage: the XSPI kernel
+	 * clock is the first casualty (MCUBoot cannot init the NOR) and only
+	 * a power cycle used to recover. Drive PF4 high and wait for the
+	 * supply to actually reach the overdrive level BEFORE ramping PLLs,
+	 * as ST prescribes ("configure VDDCORE before SystemClock_Config").
+	 */
+	LL_AHB4_GRP1_EnableClock(LL_AHB4_GRP1_PERIPH_PWR);
+	LL_AHB4_GRP1_EnableClock(LL_AHB4_GRP1_PERIPH_GPIOF);
+	stm32n6_vos_trace[0] = PWR->VOSCR;
+	if ((PWR->VOSCR & PWR_VOSCR_ACTVOS) == 0U) {
+		/* ACTVOS latches only on a completed handshake: a VOS request
+		 * edge AND the VDDCORE monitor confirming the matching voltage.
+		 * Drop to HSI first — changing the voltage scale is only legal
+		 * at low speed, and the BootROM hands over on fast PLL clocks.
+		 * The rest of this init re-ramps PLLs and sysclk afterwards.
+		 * Then do the full scale-up: request low (matching the current
+		 * supply), raise the supply via PF4, then request high.
+		 */
+		stm32_clock_switch_to_hsi();
+
+		/* The PMU can only update ACTVOS if it can SEE the supply:
+		 * enable the VDDCORE monitor (disabled in the state the
+		 * loader session leaves behind).
+		 */
+		SET_BIT(PWR->CR3, PWR_CR3_VCOREMONEN);
+
+		CLEAR_BIT(PWR->VOSCR, PWR_VOSCR_VOS);
+		for (volatile uint32_t i = 0; i < 20000U; i++) {
+		}
+		stm32n6_vos_trace[1] = PWR->VOSCR;
+
+		/* SMPS to 0.89 V (level-sensitive feedback FET on PF4), then a
+		 * generous settle time for the supply ramp: the delay here is
+		 * load-bearing (a build whose UART logging added ~10 ms here
+		 * recovered; one without it did not).
+		 */
+		LL_GPIO_SetPinOutputType(GPIOF, LL_GPIO_PIN_4, LL_GPIO_OUTPUT_PUSHPULL);
+		LL_GPIO_SetOutputPin(GPIOF, LL_GPIO_PIN_4);
+		LL_GPIO_SetPinMode(GPIOF, LL_GPIO_PIN_4, LL_GPIO_MODE_OUTPUT);
+		for (volatile uint32_t i = 0; i < 800000U; i++) {
+		}
+		stm32n6_vos_trace[2] = (GPIOF->IDR << 16) | (PWR->VOSCR & 0xFFFFU);
+		stm32n6_vos_trace[3] = PWR->CR3;
+
+		SET_BIT(PWR->VOSCR, PWR_VOSCR_VOS);
+		/* Bounded wait so a board without this failure mode can never
+		 * hang here (~hundreds of ms at HSI speed). */
+		for (uint32_t i = 0; i < 2000000U; i++) {
+			if ((PWR->VOSCR & PWR_VOSCR_ACTVOS) != 0U) {
+				break;
+			}
+		}
+		stm32n6_vos_trace[4] = PWR->VOSCR;
+		stm32n6_vos_trace[5] = PWR->CR3;
+		/* Post-handshake settle before anything runs fast */
+		for (volatile uint32_t i = 0; i < 200000U; i++) {
+		}
+	}
 
 	/* For now, enable clocks (including low_power ones) of misc RAM */
 	uint32_t misc_ram = LL_MEM_AXISRAM1 | LL_MEM_AXISRAM2 | LL_MEM_AHBSRAM1 | LL_MEM_AHBSRAM2 |
