@@ -870,6 +870,34 @@ static int stm32_xspi_mem_reset(const struct device *dev)
 	return 0;
 }
 
+#if defined(CONFIG_SOC_SERIES_STM32N6X)
+static int stm32_xspi_abort(const struct device *dev);
+
+/* Return the NOR flash to its power-on SPI mode.
+ *
+ * The MX66UW keeps its volatile octal-DTR configuration across NRST, but
+ * the BootROM starts every boot talking SPI to it — with the chip left in
+ * octal mode a warm reset makes the ROM probe for ~10 s before it manages
+ * to load the FSBL (a cold boot is fast because the power cycle resets
+ * the chip). MCUBoot calls this right before chainloading: with RAM_LOAD
+ * the image is fully copied to RAM and nothing reads the NOR afterwards
+ * (the application must keep CONFIG_FLASH disabled or it re-enters octal
+ * mode and warm resets become slow again).
+ */
+int stm32_xspi_release_to_spi(void)
+{
+	const struct device *dev = DEVICE_DT_GET_OR_NULL(DT_DRV_INST(0));
+
+	if (dev == NULL || !device_is_ready(dev)) {
+		return -ENODEV;
+	}
+
+	(void)stm32_xspi_abort(dev);     /* leave memory-mapped mode if active */
+
+	return stm32_xspi_mem_reset(dev);
+}
+#endif /* CONFIG_SOC_SERIES_STM32N6X */
+
 #ifdef CONFIG_STM32_MEMMAP
 /* Function to configure the octoflash in MemoryMapped mode */
 static int stm32_xspi_set_memorymap(const struct device *dev)
@@ -2185,54 +2213,11 @@ static int flash_stm32_xspi_init(const struct device *dev)
 			stm32n6_vos_trace[2], stm32n6_vos_trace[3],
 			stm32n6_vos_trace[4], stm32n6_vos_trace[5]);
 	}
-	/* A STM32CubeProgrammer external-loader session leaves the chip in a
-	 * state where every XSPI transaction hangs with BUSY stuck at any
-	 * clock speed, while plain register access still works; NRST does not
-	 * clear it, only powering the VCORE domain down does. The wedged
-	 * element is not visible in any register: full RCC/XSPIM/XSPI/PWR
-	 * dumps compare bit-identical to a working boot except PWR ACTVOS,
-	 * which turned out to be only a PROXY for "the domain has not been
-	 * power-cycled" (a recovered boot works fine with ACTVOS still low).
-	 * Recovery: one trip through Standby with the IWDG armed to bounce
-	 * straight back — Standby powers the VCORE domain down, which is the
-	 * software-triggered equivalent of unplugging the board. A backup
-	 * register limits this to one attempt per wedge so a state that even
-	 * Standby cannot clear does not loop.
+	/* Backup-domain access for TAMP->BKP31R (self-cycle guard, used by
+	 * the wedge probe further down after the controller is configured).
 	 */
 	__HAL_RCC_RTCAPB_CLK_ENABLE();
 	SET_BIT(PWR->DBPCR, PWR_DBPCR_DBP);
-	if ((PWR->VOSCR & PWR_VOSCR_ACTVOS) == 0U) {
-		if (TAMP->BKP31R != 0xACDC0001U) {
-			LOG_WRN("XSPI: post-flash wedged state - standby self-cycle");
-			TAMP->BKP31R = 0xACDC0001U;
-			/* IWDG at LSI/4 with a small reload resets (and thus
-			 * wakes) the chip ~1 ms after Standby entry.
-			 */
-			IWDG->KR = 0x5555U;
-			IWDG->PR = 0U;
-			IWDG->RLR = 8U;
-			IWDG->KR = 0xCCCCU;
-
-			SET_BIT(PWR->CPUCR, PWR_CPUCR_CSSF);
-			PWR->WKUPCR = 0xFFFFFFFFU;
-			SET_BIT(PWR->CPUCR, PWR_CPUCR_PDDS);
-			SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
-			__DSB();
-			for (;;) {
-				__WFI();
-			}
-		}
-		/* Normal post-self-cycle boot: the latch may still read low,
-		 * but the power-down cleared the real gate — proceed.
-		 */
-		LOG_INF("XSPI: continuing after standby self-cycle");
-		TAMP->BKP31R = 0U;
-	} else {
-		if (TAMP->BKP31R == 0xACDC0001U) {
-			LOG_INF("XSPI: recovered by standby self-cycle");
-		}
-		TAMP->BKP31R = 0U;
-	}
 	if (dev_data->hxspi.Instance == XSPI1) {
 		__HAL_RCC_XSPI1_FORCE_RESET();
 		__HAL_RCC_XSPI1_RELEASE_RESET();
@@ -2322,22 +2307,20 @@ static int flash_stm32_xspi_init(const struct device *dev)
 
 #if defined(XSPI_DCR1_DLYBYP)
 #if defined(CONFIG_SOC_SERIES_STM32N6X)
-	if ((PWR->VOSCR & PWR_VOSCR_ACTVOS) == 0U) {
-		/* In the state a CubeProgrammer external-loader session leaves
-		 * behind (voltage-scale latch ACTVOS stuck low, only POR
-		 * clears it), the delay-block calibration below returns
-		 * garbage and the programmed phase kills the XSPI output
-		 * clock entirely — every transaction then hangs with BUSY
-		 * stuck regardless of prescaler. The BootROM reads the same
-		 * NOR fine in this state because it bypasses the delay block.
-		 * Do the same, at a reduced clock where bypass timing is safe.
-		 */
-		LOG_WRN("XSPI: VOS latch low - delay block bypassed, reduced clock");
-		SET_BIT(dev_data->hxspi.Instance->DCR1, XSPI_DCR1_DLYBYP);
-		MODIFY_REG(dev_data->hxspi.Instance->DCR2,
-			   XSPI_DCR2_PRESCALER, 3U);
-	} else
-#endif /* CONFIG_SOC_SERIES_STM32N6X */
+	/* Bypass the delay block at a reduced clock, unconditionally. The
+	 * ACTVOS latch this used to key on reads 0 on EVERY boot of this
+	 * board (it is set only by a true POR with full supply sequencing),
+	 * so the bypass has always been the configuration in actual use —
+	 * the calibrated path below has never run on N6 and switching to it
+	 * would be an untested behavior change on a boot path that has
+	 * repeatedly proven fragile. The BootROM reads the same NOR with the
+	 * delay block bypassed as well.
+	 */
+	LOG_DBG("XSPI: delay block bypassed, reduced clock (N6)");
+	SET_BIT(dev_data->hxspi.Instance->DCR1, XSPI_DCR1_DLYBYP);
+	MODIFY_REG(dev_data->hxspi.Instance->DCR2,
+		   XSPI_DCR2_PRESCALER, 3U);
+#else /* CONFIG_SOC_SERIES_STM32N6X */
 	{
 		/* XSPI delay block init Function */
 		HAL_XSPI_DLYB_CfgTypeDef xspi_delay_block_cfg = {0};
@@ -2353,7 +2336,71 @@ static int flash_stm32_xspi_init(const struct device *dev)
 
 		LOG_DBG("Delay Block Init");
 	}
+#endif /* CONFIG_SOC_SERIES_STM32N6X */
 #endif /* XSPI_DCR1_DLYBYP */
+
+#if defined(CONFIG_SOC_SERIES_STM32N6X)
+	/* Wedge probe. A STM32CubeProgrammer external-loader session leaves
+	 * the chip in a state where every XSPI transaction hangs with BUSY
+	 * stuck at any clock speed while register access still works; NRST
+	 * does not clear it, only powering the VCORE domain down does. No
+	 * register exposes the state (full RCC/XSPIM/XSPI/PWR dumps compare
+	 * bit-identical to a healthy boot), so detect it the direct way: run
+	 * one harmless command-only transaction with a short timeout. On a
+	 * healthy boot this costs microseconds; when wedged it times out and
+	 * we take one IWDG-armed trip through Standby (software power cycle),
+	 * guarded by a backup register so an unclearable state cannot loop.
+	 * (The previous heuristic keyed on PWR ACTVOS, which reads 0 on every
+	 * boot — that self-cycled on EVERY reset and doubled the boot time.)
+	 * Instruction 0x00 is undefined/ignored by the NOR in any protocol
+	 * state; only the controller/XSPIM handshake is being exercised.
+	 */
+	{
+		XSPI_RegularCmdTypeDef probe = {
+			.OperationType = HAL_XSPI_OPTYPE_COMMON_CFG,
+			.Instruction = 0x00U,
+			.InstructionMode = HAL_XSPI_INSTRUCTION_1_LINE,
+			.InstructionWidth = HAL_XSPI_INSTRUCTION_8_BITS,
+			.InstructionDTRMode = HAL_XSPI_INSTRUCTION_DTR_DISABLE,
+			.AddressMode = HAL_XSPI_ADDRESS_NONE,
+			.AlternateBytesMode = HAL_XSPI_ALT_BYTES_NONE,
+			.DataMode = HAL_XSPI_DATA_NONE,
+			.DummyCycles = 0U,
+			.DQSMode = HAL_XSPI_DQS_DISABLE,
+#ifdef XSPI_CCR_SIOO
+			.SIOOMode = HAL_XSPI_SIOO_INST_EVERY_CMD,
+#endif
+		};
+
+		if (HAL_XSPI_Command(&dev_data->hxspi, &probe, 50) != HAL_OK) {
+			if (TAMP->BKP31R != 0xACDC0001U) {
+				LOG_WRN("XSPI: wedged (probe timeout) - standby self-cycle");
+				TAMP->BKP31R = 0xACDC0001U;
+				/* IWDG at LSI/4 with a small reload resets (and
+				 * thus wakes) the chip ~1 ms after Standby entry.
+				 */
+				IWDG->KR = 0x5555U;
+				IWDG->PR = 0U;
+				IWDG->RLR = 8U;
+				IWDG->KR = 0xCCCCU;
+
+				SET_BIT(PWR->CPUCR, PWR_CPUCR_CSSF);
+				PWR->WKUPCR = 0xFFFFFFFFU;
+				SET_BIT(PWR->CPUCR, PWR_CPUCR_PDDS);
+				SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
+				__DSB();
+				for (;;) {
+					__WFI();
+				}
+			}
+			LOG_ERR("XSPI: still wedged after standby self-cycle");
+			/* fall through: later operations will surface errors */
+		} else if (TAMP->BKP31R == 0xACDC0001U) {
+			LOG_INF("XSPI: recovered by standby self-cycle");
+		}
+		TAMP->BKP31R = 0U;
+	}
+#endif /* CONFIG_SOC_SERIES_STM32N6X */
 
 #ifdef CONFIG_FLASH_STM32_XSPI_DMA
 	/* Configure and enable the DMA channels after XSPI config */
