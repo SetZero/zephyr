@@ -426,14 +426,23 @@ zephyr_udc0: &usbotg_hs1 {
 				#address-cells = <1>;
 				#size-cells = <1>;
 
+				/* 128 KB boot partition: the 64 KB default silently
+				 * corrupted any FSBL > 64 KB (the slot-0 download
+				 * overwrote its tail; the BootROM then rejected the
+				 * signature and fell back to its USB DFU loader -
+				 * black screen, no UART, debug AP gated). The FSBL
+				 * with USB CDC-ACM serial recovery is ~93 KB. A
+				 * build-time size guard now backs this up (see
+				 * soc/st/stm32/stm32n6x/CMakeLists.txt).
+				 */
 				boot_partition: partition@0 {
 					label = "mcuboot";
-					reg = <0x00000000 DT_SIZE_K(64)>;
+					reg = <0x00000000 DT_SIZE_K(128)>;
 				};
 
-				slot0_partition: partition@10000 {
+				slot0_partition: partition@20000 {
 					label = "image-0";
-					reg = <0x10000 DT_SIZE_K(1536)>;
+					reg = <0x20000 DT_SIZE_K(1536)>;
 				};
 
 				slot1_partition: partition@210000 {

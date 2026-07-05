@@ -67,6 +67,20 @@ if(NOT CONFIG_BOOTLOADER_MCUBOOT AND CONFIG_TRUSTED_EXECUTION_SECURE)
       WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
     )
 
+    # The signed FSBL must fit the boot partition or the slot-0 download
+    # corrupts it on the NOR (BootROM then falls back to USB DFU with a
+    # black screen). Enforce at build time.
+    dt_nodelabel(boot_part_path NODELABEL "boot_partition")
+    if(DEFINED boot_part_path)
+      dt_reg_size(boot_part_size PATH ${boot_part_path})
+      set_property(GLOBAL APPEND PROPERTY extra_post_build_commands
+        COMMAND ${CMAKE_COMMAND}
+          -DBIN=${PROJECT_BINARY_DIR}/${CONFIG_KERNEL_BIN_NAME}.signed.bin
+          -DMAX=${boot_part_size}
+          -P ${CMAKE_CURRENT_LIST_DIR}/check_fsbl_size.cmake
+      )
+    endif()
+
     set_property(TARGET runners_yaml_props_target PROPERTY bin_file ${CONFIG_KERNEL_BIN_NAME}.signed.bin)
   endif()
 
