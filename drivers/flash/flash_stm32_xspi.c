@@ -1468,8 +1468,18 @@ write_end:
 	return ret;
 }
 
+/* write_block_size MUST be 2, not 1: in octal-DTR mode the NOR programs
+ * two bytes per DTR clock-edge pair — an odd-length or odd-address write
+ * cannot exist on the wire, and the trailing byte's partner cell gets
+ * programmed with padding, AND-ing garbage into previously written data.
+ * Observed on the N6570-DK MX66UW during MCUBoot serial recovery: exactly
+ * one corrupted byte (bits cleared, never set) every second unaligned
+ * upload chunk (VRFY instrumentation in the mcuboot fork, 2026-07-04).
+ * With 2 reported here, callers (e.g. mcuboot's bs_upload) align writes
+ * themselves and the corruption disappears.
+ */
 static const struct flash_parameters flash_stm32_xspi_parameters = {
-	.write_block_size = 1,
+	.write_block_size = 2,
 	.erase_value = 0xff
 };
 
