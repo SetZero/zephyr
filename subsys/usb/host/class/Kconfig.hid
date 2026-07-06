@@ -1,0 +1,19 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+config USBH_HID_CLASS
+	bool "USB host HID class, boot-protocol mouse [EXPERIMENTAL]"
+	select EXPERIMENTAL
+	select INPUT
+	help
+	  Host-side HID class driver limited to the boot-protocol mouse.
+	  Reports are delivered through the input subsystem as relative
+	  pointer events (INPUT_REL_X/Y/WHEEL, INPUT_BTN_LEFT/RIGHT/MIDDLE).
+
+if USBH_HID_CLASS
+
+module = USBH_HID
+module-str = usbh hid
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # USBH_HID_CLASS
