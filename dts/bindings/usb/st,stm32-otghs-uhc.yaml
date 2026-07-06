@@ -1,0 +1,50 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  STM32 USB OTG High-Speed controller operated in HOST mode through the
+  UHC (USB host controller) driver API.
+
+  Assign this compatible to an OTG_HS instance node (replacing the
+  device-mode "st,stm32-otghs" compatible) to hand the instance to the
+  uhc_stm32 driver, e.g. in a board overlay:
+
+    zephyr_uhc0: &usbotg_hs2 {
+        compatible = "st,stm32-otghs-uhc";
+        status = "okay";
+    };
+
+  The device-mode compatible must not be present on the same node, or
+  the device-mode drivers would also claim the instance.
+
+compatible: "st,stm32-otghs-uhc"
+
+include: usb-controller.yaml
+
+properties:
+  reg:
+    required: true
+
+  interrupts:
+    required: true
+
+  clocks:
+    required: true
+    description: |
+      Core clock gate (and optionally the PHY reference clock source
+      selection as the second element), identical to the device-mode
+      binding of the instance.
+
+  phys:
+    type: phandles
+    required: true
+    description: PHY provider (embedded HS PHY, e.g. st,stm32-usbphyc).
+
+  num-bidir-endpoints:
+    type: int
+    description: Number of bi-directional endpoints supported by the core.
+
+  ram-size:
+    type: int
+    description: |
+      Size of the shared endpoint FIFO RAM in bytes.

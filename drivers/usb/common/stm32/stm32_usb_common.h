@@ -11,15 +11,21 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/types.h>
 
-/* Compatible of all STM32 USB controllers */
+/* Compatible of all STM32 USB controllers
+ * (st_stm32_otghs_uhc is an OTG_HS instance operated in host mode
+ * by the uhc_stm32 driver; listed here so the PHY pseudo-device
+ * machinery below also instantiates for host-mode nodes.)
+ */
 #define STM32_USB_COMPATIBLES								\
-	st_stm32_usb, st_stm32_otgfs, st_stm32_otghs
+	st_stm32_usb, st_stm32_otgfs, st_stm32_otghs, st_stm32_otghs_uhc
 
 /* Shorthand to obtain PHY node for an instance */
 #define USB_STM32_PHY(usb_node)			DT_PROP_BY_IDX(usb_node, phys, 0)
 
 /* Evaluates to 1 if `usb_node` is High-Speed capable, 0 otherwise. */
-#define USB_STM32_NODE_IS_HS_CAPABLE(usb_node)	DT_NODE_HAS_COMPAT(usb_node, st_stm32_otghs)
+#define USB_STM32_NODE_IS_HS_CAPABLE(usb_node)						\
+	UTIL_OR(DT_NODE_HAS_COMPAT(usb_node, st_stm32_otghs),				\
+		DT_NODE_HAS_COMPAT(usb_node, st_stm32_otghs_uhc))
 
 /* Evaluates to 1 if PHY of `usb_node` is an ULPI PHY, 0 otherwise. */
 #define USB_STM32_NODE_PHY_IS_ULPI(usb_node)						\

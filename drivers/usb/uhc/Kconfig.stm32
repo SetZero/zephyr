@@ -1,0 +1,33 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+config UHC_STM32
+	bool "STM32 OTG_HS host controller driver"
+	default y
+	depends on DT_HAS_ST_STM32_OTGHS_UHC_ENABLED
+	select STM32_USB_COMMON
+	select USE_STM32_HAL_HCD
+	select USE_STM32_LL_PWR
+	select EVENTS
+	help
+	  STM32 USB host controller driver: operates an OTG_HS instance
+	  in host mode through the STM32Cube HAL HCD layer.
+
+if UHC_STM32
+
+config UHC_STM32_THREAD_STACK_SIZE
+	int "UHC STM32 driver internal thread stack size"
+	default 1024
+	help
+	  Stack size of the driver thread that performs port state
+	  handling and transfer scheduling.
+
+config UHC_STM32_THREAD_PRIORITY
+	int "UHC STM32 driver thread priority"
+	default 8
+	help
+	  Preemptible priority of the driver thread. Must be able to
+	  preempt the application main loop so that mouse/HID polling
+	  stays responsive.
+
+endif # UHC_STM32
