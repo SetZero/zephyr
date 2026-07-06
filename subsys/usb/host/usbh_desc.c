@@ -186,9 +186,17 @@ const void *usbh_desc_get_next_function(const void *const desc)
 		skip_num = ass_d->bInterfaceCount;
 	}
 
-	/* Skip the interface if the head is interface */
+	/*
+	 * When head is a standalone interface, the loop below advances past
+	 * it with usbh_desc_get_next() before it re-encounters any interface
+	 * descriptor, so no additional interfaces must be skipped: the next
+	 * interface found IS the next function. (Setting skip_num = 1 here
+	 * dropped that very next interface, so a composite device without
+	 * IADs — e.g. a HID receiver exposing separate keyboard/mouse/vendor
+	 * interfaces — never matched anything past interface 0.)
+	 */
 	if (usbh_desc_is_valid_interface(head)) {
-		skip_num = 1;
+		skip_num = 0;
 	}
 
 	while (true) {
