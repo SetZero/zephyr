@@ -77,10 +77,21 @@ static int usbh_hid_report_cb(struct usb_device *const udev,
 	 * back off after repeated failures so a persistently halted
 	 * endpoint cannot busy-loop. */
 	if (xfer->err != 0) {
+		const int xfer_err = xfer->err;
+
 		if (buf != NULL) {
 			usbh_xfer_buf_free(udev, buf);
 		}
 		(void)usbh_xfer_free(udev, xfer);
+
+		if (xfer_err == -ECONNRESET) {
+			/* Disconnect: stop polling now instead of retrying
+			 * against a dead bus; usbh_hid_removed() finishes
+			 * the cleanup and re-arms the class for a replug.
+			 */
+			data->running = false;
+			return 0;
+		}
 
 		if (++data->err_streak > 32U) {
 			LOG_WRN("Mouse poll giving up after repeated err");
@@ -228,6 +239,7 @@ static int usbh_hid_probe(struct usbh_class_data *const c_data,
 	data->udev = udev;
 	data->iface = iface;
 	data->prev_buttons = 0U;
+	data->err_streak = 0U;
 
 	data->int_in = usbh_hid_get_int_in(udev, iface);
 	if (data->int_in == NULL) {
@@ -283,9 +295,24 @@ static int usbh_hid_removed(struct usbh_class_data *const c_data)
 	data->udev = NULL;
 	data->int_in = NULL;
 
-	if (data->prev_buttons & BIT(0)) {
-		/* Do not leave a phantom pressed button behind. */
-		input_report_key(NULL, INPUT_BTN_LEFT, 0, true, K_NO_WAIT);
+	if (data->prev_buttons != 0U) {
+		/* Do not leave phantom pressed buttons behind. */
+		unsigned int left = (data->prev_buttons & BIT(0) ? 1U : 0U) +
+				    (data->prev_buttons & BIT(1) ? 1U : 0U) +
+				    (data->prev_buttons & BIT(2) ? 1U : 0U);
+
+		if (data->prev_buttons & BIT(0)) {
+			input_report_key(NULL, INPUT_BTN_LEFT, 0,
+					 --left == 0U, K_NO_WAIT);
+		}
+		if (data->prev_buttons & BIT(1)) {
+			input_report_key(NULL, INPUT_BTN_RIGHT, 0,
+					 --left == 0U, K_NO_WAIT);
+		}
+		if (data->prev_buttons & BIT(2)) {
+			input_report_key(NULL, INPUT_BTN_MIDDLE, 0,
+					 --left == 0U, K_NO_WAIT);
+		}
 		data->prev_buttons = 0U;
 	}
 

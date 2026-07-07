@@ -529,12 +529,18 @@ static void handle_disconnect(struct uhc_stm32_data *priv)
 			(void)HAL_HCD_HC_Halt(&priv->hcd, ch);
 			xfer = pipe->xfer;
 			pipe->xfer = NULL;
-			pipe->busy = false;
-			/* Force re-init on next use */
-			pipe->ep = 0U;
-			pipe->addr = 0U;
 			uhc_xfer_return(priv->dev, xfer, -ECONNRESET);
 		}
+
+		/* Force re-init on next use, idle channels included: a
+		 * re-attached device typically gets the same address and
+		 * endpoints again and must not inherit this channel's
+		 * data toggle from the previous device.
+		 */
+		pipe->busy = false;
+		pipe->ep = 0U;
+		pipe->addr = 0U;
+		pipe->next_submit = 0;
 	}
 
 	while ((node = sys_dlist_peek_head(&data->ctrl_xfers)) != NULL) {

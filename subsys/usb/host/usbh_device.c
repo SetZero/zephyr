@@ -46,6 +46,10 @@ void usbh_device_free(struct usb_device *const udev)
 		k_heap_free(&usb_device_heap, udev->cfg_desc);
 	}
 
+	if (uhs_ctx->root == udev) {
+		uhs_ctx->root = NULL;
+	}
+
 	k_mem_slab_free(&usb_device_slab, (void *)udev);
 }
 
