@@ -113,6 +113,18 @@ config FS_FATFS_EXTRA_NATIVE_API
 	   * `f_findfirst`
 	   * `f_findnext`
 
+config FS_FATFS_FAST_SEEK
+	bool "Fast seek (FF_USE_FASTSEEK)"
+	help
+	  Enable FatFS fast-seek mode: a caller-provided cluster link map
+	  table (FIL.cltbl, filled via f_lseek(fp, CREATE_LINKMAP)) makes
+	  subsequent seeks compute the target cluster directly instead of
+	  walking the FAT chain from the start of the file. Essential for
+	  random access within multi-GB files on FAT/exFAT, where each
+	  backward seek otherwise costs hundreds of FAT sector reads.
+	  Native-API feature: the map must be attached through the FatFS
+	  FIL object; the Zephyr VFS wrapper does not manage it.
+
 config FS_FATFS_LFN
 	bool "Long filenames (LFN)"
 	help

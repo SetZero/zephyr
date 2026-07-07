@@ -129,6 +129,11 @@
 #define FF_USE_FIND 1
 #endif /* defined(CONFIG_FS_FATFS_EXTRA_NATIVE_API) */
 
+#if defined(CONFIG_FS_FATFS_FAST_SEEK)
+#undef FF_USE_FASTSEEK
+#define FF_USE_FASTSEEK 1
+#endif /* defined(CONFIG_FS_FATFS_FAST_SEEK) */
+
 /*
  * When custom mount points are activated FF_VOLUME_STRS needs
  * to be undefined in order to be able to provide a custom
