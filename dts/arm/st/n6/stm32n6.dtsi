@@ -36,10 +36,32 @@
 			reg = <0>;
 			#address-cells = <1>;
 			#size-cells = <1>;
+			cpu-power-states = <&stop>;
 
 			mpu: mpu@e000ed90 {
 				compatible = "arm,armv8.1m-mpu";
 				reg = <0xe000ed90 0x40>;
+			};
+		};
+
+		power-states {
+			/* Stop mode: VCORE clock-gated but powered, all SRAM
+			 * and peripheral registers retained; wake-up via EXTI
+			 * only. SysTick (the only supported kernel timer on
+			 * this series so far) stops counting in Stop mode, so
+			 * kernel timeouts can NOT wake the system and uptime
+			 * pauses — Stop is only entered for indefinite,
+			 * event-woken suspensions. The large min-residency
+			 * keeps the residency-based policy from picking it
+			 * for ordinary timed idle gaps; the exit latency is
+			 * dominated by the PLL/IC clock-tree restore.
+			 */
+			stop: state0 {
+				compatible = "zephyr,power-state";
+				power-state-name = "suspend-to-idle";
+				substate-id = <1>;
+				min-residency-us = <5000000>;
+				exit-latency-us = <3000>;
 			};
 		};
 	};
