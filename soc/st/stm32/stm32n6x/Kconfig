@@ -31,6 +31,26 @@ if SOC_SERIES_STM32N6X
 config STM32N6_BOOT_SERIAL
 	bool "Serial boot target (USB)"
 
+choice POWER_SUPPLY_CHOICE
+	prompt "VCORE power supply configuration"
+	default POWER_SUPPLY_EXTERNAL_SOURCE
+	help
+	  Written once into PWR_CR1 early at boot (see pwr_supply.c) — the
+	  low-power wake-up sequencer does not work until the supply
+	  configuration has been programmed.
+
+config POWER_SUPPLY_EXTERNAL_SOURCE
+	bool "VCORE supplied from an external source"
+	help
+	  The internal SMPS step-down converter is disabled; VDDCORE comes
+	  from an external regulator (the STM32N6570-DK and Nucleo-N657X0-Q
+	  reference designs).
+
+config POWER_SUPPLY_DIRECT_SMPS
+	bool "VCORE supplied from the internal SMPS step-down converter"
+
+endchoice
+
 config STM32N6_RIF_OPEN
 	bool "Configure the RIF with all OPEN access"
 	default y

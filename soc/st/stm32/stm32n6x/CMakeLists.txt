@@ -3,6 +3,7 @@
 zephyr_include_directories(${ZEPHYR_BASE}/drivers)
 zephyr_sources(
   soc.c
+  pwr_supply.c
 )
 
 zephyr_sources_ifdef(CONFIG_STM32N6_NPU
