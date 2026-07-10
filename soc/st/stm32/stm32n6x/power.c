@@ -10,6 +10,7 @@
 
 #include <stm32_ll_cortex.h>
 #include <stm32_ll_pwr.h>
+#include <stm32_ll_rcc.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(soc, CONFIG_SOC_LOG_LEVEL);
@@ -18,6 +19,15 @@ LOG_MODULE_DECLARE(soc, CONFIG_SOC_LOG_LEVEL);
  * driver family, so clock_stm32_ll_common.h does not apply to it)
  */
 int stm32_clock_control_init(const struct device *dev);
+
+/* CPUSW is NOT restored by stm32_clock_control_init (at boot the CPU
+ * clock source is inherited from the FSBL), but a Stop exit restarts
+ * the CPU on the STOPWUCK clock (HSI): without an explicit restore the
+ * CPU stays at 64 MHz while every bus/peripheral clock is back at full
+ * speed — a silently 12x slower system. Saved at entry, restored after
+ * the clock tree in the exit ops.
+ */
+static uint32_t stm32n6_saved_cpusw;
 
 /*
  * System PM backend for the STM32N6.
@@ -51,16 +61,19 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 
 	switch (substate_id) {
 	case 1: /* Stop mode */
+		stm32n6_saved_cpusw = LL_RCC_GetCpuClkSource();
 		/* Clear stale STOPF/SBF status flags */
 		LL_PWR_ClearFlag_STOP_SB();
 		/* Deepsleep = Stop, not Standby */
 		LL_PWR_SetPowerDownModeDS(LL_PWR_POWERDOWN_MODE_DS_STOP);
 		LL_LPM_EnableDeepSleep();
+		printk("PM: >wfi\n");   /* TEMP diagnostic */
 		/* Enter Stop mode: idle unmasks interrupts atomically with
 		 * the WFI; the wake IRQ is dispatched only after
 		 * pm_state_exit_post_ops() restored the clock tree.
 		 */
 		k_cpu_idle();
+		printk("PM: <wfi\n");   /* TEMP diagnostic (HSI baud: garbled) */
 		break;
 	default:
 		LOG_DBG("Unsupported power state substate-id %u", substate_id);
@@ -91,6 +104,19 @@ void pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id)
 		 * external supply keeps its level through Stop).
 		 */
 		stm32_clock_control_init(NULL);
+		/* CPU back on its pre-suspend clock source (see above).
+		 * GetCpuClkSource returns the CPUSWS status field; the CPUSW
+		 * request field uses the same two-bit encoding.
+		 */
+		LL_RCC_SetCpuClkSource(stm32n6_saved_cpusw >> (RCC_CFGR1_CPUSWS_Pos - RCC_CFGR1_CPUSW_Pos));
+		/* Bounded: a wake must never hard-hang on a clock switch —
+		 * worst case the CPU stays on HSI (slow but alive). */
+		for (uint32_t i = 0; i < 4000000U; i++) {
+			if (LL_RCC_GetCpuClkSource() == stm32n6_saved_cpusw) {
+				break;
+			}
+		}
+		printk("PM: postops cfgr1=%x\n", (unsigned)RCC->CFGR1);
 	}
 
 	/*
